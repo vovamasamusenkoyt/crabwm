@@ -5,9 +5,18 @@ edition = "2024"
 
 [dependencies]
 smithay = { version = "0.7", default-features = false, features = [
-    "backend_winit",
+    "backend_drm",
+    "backend_gbm",
+    "backend_udev",
+    "backend_libinput",
+    "backend_session_libseat",
     "backend_egl",
     "renderer_gl",
+    "renderer_pixman",
+    "renderer_multi",
     "wayland_frontend",
     "desktop",
 ] }
+# smithay-drm-extras disabled due to libdisplay-info version conflict; using custom scanner
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
