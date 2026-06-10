@@ -68,6 +68,10 @@ struct State {
     primary_gpu: DrmNode,
     backends: HashMap<DrmNode, BackendData>,
     handle: LoopHandle<'static, State>,
+    cursor_x: f64,
+    cursor_y: f64,
+    output_w: i32,
+    output_h: i32,
 }
 
 fn main() {
@@ -102,6 +106,10 @@ fn main() {
         primary_gpu,
         backends: HashMap::new(),
         handle,
+        cursor_x: 100.0,
+        cursor_y: 100.0,
+        output_w: 1920,
+        output_h: 1080,
     };
 
     state
@@ -132,7 +140,7 @@ fn main() {
         .handle
         .insert_source(
             LibinputInputBackend::new(libinput),
-            |event, _, _state| match event {
+            |event, _, state| match event {
                 InputEvent::Keyboard { event } => {
                     tracing::info!("key: {:?}", event.key_code());
                 }
@@ -141,7 +149,9 @@ fn main() {
                 }
                 InputEvent::PointerMotion { event } => {
                     let p = event.delta();
-                    tracing::debug!("mouse: ({:.1}, {:.1})", p.x, p.y);
+                    state.cursor_x = (state.cursor_x + p.x).clamp(0.0, state.output_w as f64);
+                    state.cursor_y = (state.cursor_y + p.y).clamp(0.0, state.output_h as f64);
+                    redraw(state);
                 }
                 InputEvent::DeviceAdded { device } => {
                     tracing::info!("input: {}", device.name());
@@ -203,6 +213,40 @@ fn main() {
         event_loop
             .dispatch(Some(Duration::from_millis(16)), &mut state)
             .unwrap();
+    }
+}
+
+fn redraw(state: &mut State) {
+    let rn = state.primary_gpu;
+    for backend in state.backends.values_mut() {
+        for (_crtc, sd) in &mut backend.surfaces {
+            let mut renderer = match state.gpus.single_renderer(&rn) {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::warn!("render: {e:?}");
+                    continue;
+                }
+            };
+
+            let sz = sd._output.current_mode().unwrap().size;
+            let bg = SolidColorBuffer::new((sz.w, sz.h), Color32F::new(0.0, 0.2, 0.8, 1.0));
+            let bg_el = SolidColorRenderElement::from_buffer(&bg, (0, 0), 1.0, 1.0, Kind::Unspecified);
+
+            let cursor_size = 32;
+            let cx = state.cursor_x as i32;
+            let cy = state.cursor_y as i32;
+            let cur = SolidColorBuffer::new((cursor_size, cursor_size), Color32F::new(1.0, 1.0, 1.0, 1.0));
+            let cur_el = SolidColorRenderElement::from_buffer(&cur, (cx, cy), 1.0, 1.0, Kind::Unspecified);
+
+            if let Ok(_) = sd.drm_output.render_frame(
+                &mut renderer,
+                &[bg_el, cur_el],
+                Color32F::new(0.0, 0.2, 0.8, 1.0),
+                FrameFlags::empty(),
+            ) {
+                let _ = sd.drm_output.commit_frame();
+            }
+        }
     }
 }
 
@@ -295,6 +339,7 @@ fn device_added(
             _token,
         },
     );
+    redraw(state);
     Ok(())
 }
 
@@ -396,6 +441,11 @@ fn init_connectors(
             }
         };
 
+        // store output size for cursor bounds
+        let sz = output.current_mode().unwrap().size;
+        state.output_w = sz.w;
+        state.output_h = sz.h;
+
         surfaces.insert(
             crtc,
             SurfaceData {
@@ -403,31 +453,6 @@ fn init_connectors(
                 drm_output,
             },
         );
-    }
-
-    // render first frame on all surfaces
-    let rn = render_node.unwrap_or(state.primary_gpu);
-    for (_crtc, sd) in &mut surfaces {
-        let mut renderer = match state.gpus.single_renderer(&rn) {
-            Ok(r) => r,
-            Err(e) => {
-                tracing::warn!("render: {e:?}");
-                continue;
-            }
-        };
-
-        let sz = sd._output.current_mode().unwrap().size;
-        let buf = SolidColorBuffer::new((sz.w, sz.h), Color32F::new(0.0, 0.2, 0.8, 1.0));
-        let el = SolidColorRenderElement::from_buffer(&buf, (0, 0), 1.0, 1.0, Kind::Unspecified);
-
-        if let Ok(_) = sd.drm_output.render_frame(
-            &mut renderer,
-            &[el],
-            Color32F::new(0.0, 0.2, 0.8, 1.0),
-            FrameFlags::empty(),
-        ) {
-            let _ = sd.drm_output.commit_frame();
-        }
     }
 
     surfaces
