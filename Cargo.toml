@@ -1,0 +1,13 @@
+[package]
+name = "crabwm"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+smithay = { version = "0.7", default-features = false, features = [
+    "backend_winit",
+    "backend_egl",
+    "renderer_gl",
+    "wayland_frontend",
+    "desktop",
+] }
