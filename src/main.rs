@@ -58,7 +58,7 @@ struct SurfaceData {
 struct BackendData {
     drm_output_manager: OutMgr,
     surfaces: HashMap<crtc::Handle, SurfaceData>,
-    render_node: Option<DrmNode>,
+    render_node: DrmNode,
     _token: RegistrationToken,
 }
 
@@ -222,8 +222,8 @@ fn main() {
 
 fn redraw(state: &mut State) {
     tracing::info!("redraw at ({:.0}, {:.0})", state.cursor_x, state.cursor_y);
-    let rn = state.primary_gpu;
     for backend in state.backends.values_mut() {
+        let rn = backend.render_node;
         for (_crtc, sd) in &mut backend.surfaces {
             let mut renderer = match state.gpus.single_renderer(&rn) {
                 Ok(r) => r,
@@ -284,42 +284,34 @@ fn device_added(
         })
         .unwrap();
 
-    let render_node = (|| -> Option<DrmNode> {
-        let display = unsafe { EGLDisplay::new(gbm.clone()).ok()? };
-        let egl_dev = EGLDevice::device_for_display(&display).ok()?;
-        if egl_dev.is_software() {
-            return None;
+    // try to get a render node, fall back to the drm node itself
+    let render_node = (|| -> DrmNode {
+        if let Ok(display) = unsafe { EGLDisplay::new(gbm.clone()) } {
+            if let Ok(egl_dev) = EGLDevice::device_for_display(&display) {
+                let render = egl_dev
+                    .try_get_render_node()
+                    .ok()
+                    .flatten()
+                    .unwrap_or(node);
+                let _ = state.gpus.as_mut().add_node(render, gbm.clone());
+                return render;
+            }
         }
-        let render = egl_dev
-            .try_get_render_node()
-            .ok()
-            .flatten()
-            .unwrap_or(node);
-        state.gpus.as_mut().add_node(render, gbm.clone()).ok()?;
-        Some(render)
+        // fallback: register the drm node itself
+        let _ = state.gpus.as_mut().add_node(node, gbm.clone());
+        node
     })();
 
-    let allocator = match render_node {
-        Some(_) => GbmAllocator::new(
-            gbm.clone(),
-            GbmBufferFlags::RENDERING | GbmBufferFlags::SCANOUT,
-        ),
-        None => {
-            let primary = state
-                .backends
-                .get(&state.primary_gpu)
-                .or_else(|| state.backends.values().next())
-                .ok_or("no gpu")?;
-            primary.drm_output_manager.allocator().clone()
-        }
-    };
+    let allocator = GbmAllocator::new(
+        gbm.clone(),
+        GbmBufferFlags::RENDERING | GbmBufferFlags::SCANOUT,
+    );
 
-    let exporter = GbmFramebufferExporter::new(gbm, render_node);
+    let exporter = GbmFramebufferExporter::new(gbm, Some(render_node));
 
     let color_formats = [Fourcc::Abgr8888, Fourcc::Argb8888];
     let render_formats = {
-        let rn = render_node.unwrap_or(state.primary_gpu);
-        let mut renderer = state.gpus.single_renderer(&rn)?;
+        let mut renderer = state.gpus.single_renderer(&render_node)?;
         renderer
             .as_mut()
             .egl_context()
@@ -356,7 +348,7 @@ fn device_added(
 fn init_connectors(
     state: &mut State,
     mgr: &mut OutMgr,
-    render_node: Option<DrmNode>,
+    render_node: DrmNode,
 ) -> HashMap<crtc::Handle, SurfaceData> {
     let res = match mgr.device().resource_handles() {
         Ok(r) => r,
@@ -426,8 +418,7 @@ fn init_connectors(
             }
         };
 
-        let rn = render_node.unwrap_or(state.primary_gpu);
-        let mut renderer = match state.gpus.single_renderer(&rn) {
+        let mut renderer = match state.gpus.single_renderer(&render_node) {
             Ok(r) => r,
             Err(e) => {
                 tracing::warn!("renderer: {e:?}");
