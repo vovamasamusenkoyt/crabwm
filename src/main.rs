@@ -76,7 +76,11 @@ struct State {
 
 fn main() {
     tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::builder()
+                .with_default_directive(tracing::Level::WARN.into())
+                .from_env_lossy(),
+        )
         .init();
 
     let mut event_loop: EventLoop<State> = EventLoop::try_new().unwrap();
@@ -217,13 +221,14 @@ fn main() {
 }
 
 fn redraw(state: &mut State) {
+    tracing::info!("redraw at ({:.0}, {:.0})", state.cursor_x, state.cursor_y);
     let rn = state.primary_gpu;
     for backend in state.backends.values_mut() {
         for (_crtc, sd) in &mut backend.surfaces {
             let mut renderer = match state.gpus.single_renderer(&rn) {
                 Ok(r) => r,
                 Err(e) => {
-                    tracing::warn!("render: {e:?}");
+                    tracing::error!("renderer: {e:?}");
                     continue;
                 }
             };
@@ -238,13 +243,18 @@ fn redraw(state: &mut State) {
             let cur = SolidColorBuffer::new((cursor_size, cursor_size), Color32F::new(1.0, 1.0, 1.0, 1.0));
             let cur_el = SolidColorRenderElement::from_buffer(&cur, (cx, cy), 1.0, 1.0, Kind::Unspecified);
 
-            if let Ok(_) = sd.drm_output.render_frame(
+            match sd.drm_output.render_frame(
                 &mut renderer,
                 &[bg_el, cur_el],
                 Color32F::new(0.0, 0.2, 0.8, 1.0),
                 FrameFlags::empty(),
             ) {
-                let _ = sd.drm_output.commit_frame();
+                Ok(_) => {
+                    if let Err(e) = sd.drm_output.commit_frame() {
+                        tracing::error!("commit: {e:?}");
+                    }
+                }
+                Err(e) => tracing::error!("render: {e:?}"),
             }
         }
     }
