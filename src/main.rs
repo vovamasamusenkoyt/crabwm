@@ -22,11 +22,12 @@ use smithay::{
         libinput::{LibinputInputBackend, LibinputSessionInterface},
         renderer::{
             element::{
-                solid::{SolidColorBuffer, SolidColorRenderElement},
+                memory::{MemoryRenderBuffer, MemoryRenderBufferRenderElement},
+                solid::SolidColorRenderElement,
                 Kind,
             },
             gles::GlesRenderer,
-            multigpu::{gbm::GbmGlesBackend, GpuManager},
+            multigpu::{gbm::GbmGlesBackend, GpuManager, MultiRenderer},
             Color32F,
         },
         session::{libseat::LibSeatSession, Event as SessionEvent, Session},
@@ -40,7 +41,7 @@ use smithay::{
         rustix::fs::OFlags,
         wayland_server::Display,
     },
-    utils::DeviceFd,
+    utils::{DeviceFd, Transform},
 };
 
 type GbmBackend = GbmGlesBackend<GlesRenderer, DrmDeviceFd>;
@@ -65,6 +66,7 @@ struct BackendData {
 struct State {
     session: LibSeatSession,
     gpus: GpuManager<GbmBackend>,
+    #[allow(dead_code)]
     primary_gpu: DrmNode,
     backends: HashMap<DrmNode, BackendData>,
     handle: LoopHandle<'static, State>,
@@ -73,6 +75,9 @@ struct State {
     output_w: i32,
     output_h: i32,
     needs_redraw: bool,
+    text_buffer: Option<MemoryRenderBuffer>,
+    text_size: Option<(u32, u32)>,
+    cursor_buffer: Option<MemoryRenderBuffer>,
 }
 
 fn main() {
@@ -116,6 +121,9 @@ fn main() {
         output_w: 1920,
         output_h: 1080,
         needs_redraw: true,
+        text_buffer: None,
+        text_size: None,
+        cursor_buffer: None,
     };
 
     state
@@ -178,6 +186,15 @@ fn main() {
             device_added(&mut state, node, path).expect("primary device");
         }
     }
+
+    if let Some((buf, sz)) = create_hello_world_buffer(48.0) {
+        state.text_size = Some(sz);
+        state.text_buffer = Some(buf);
+        tracing::info!("created Hello World text buffer ({}x{})", sz.0, sz.1);
+    } else {
+        tracing::warn!("failed to create text buffer");
+    }
+    state.cursor_buffer = create_crosshair_buffer(6, 4, 14);
     for (dev_id, path) in udev.device_list() {
         if first_dev
             .map(|(id, _)| id == dev_id)
@@ -226,6 +243,96 @@ fn main() {
     }
 }
 
+fn create_crosshair_buffer(size: u32, thickness: u32, arm: u32) -> Option<MemoryRenderBuffer> {
+    let w = (arm * 2 + size) as u32;
+    let h = (arm * 2 + size) as u32;
+    let mut buf = vec![0u8; (w * h * 4) as usize];
+    let stride = w as usize * 4;
+    let cx = w / 2;
+    let cy = h / 2;
+
+    for y in 0..h {
+        for x in 0..w {
+            let dx = x.abs_diff(cx);
+            let dy = y.abs_diff(cy);
+            let on = (dx < thickness && dy < arm + size / 2)
+                || (dy < thickness && dx < arm + size / 2);
+            if on {
+                let i = y as usize * stride + x as usize * 4;
+                buf[i] = 255;
+                buf[i + 1] = 255;
+                buf[i + 2] = 255;
+                buf[i + 3] = 255;
+            }
+        }
+    }
+
+    Some(MemoryRenderBuffer::from_slice(
+        &buf,
+        Fourcc::Abgr8888,
+        (w as i32, h as i32),
+        1,
+        Transform::Normal,
+        None,
+    ))
+}
+
+fn create_hello_world_buffer(font_size: f32) -> Option<(MemoryRenderBuffer, (u32, u32))> {
+    use ab_glyph::{point, Font, FontRef, PxScale, ScaleFont};
+
+    let data = std::fs::read("/usr/share/fonts/TTF/DejaVuSans.ttf").ok()?;
+    let font = FontRef::try_from_slice(&data).ok()?;
+    let px_scale = PxScale::from(font_size);
+    let scaled = font.as_scaled(px_scale);
+
+    let text = "Hello World";
+    let mut glyphs = Vec::new();
+    let mut x = 0f32;
+    for c in text.chars() {
+        let mut g = font.glyph_id(c).with_scale(px_scale);
+        let h = scaled.h_advance(g.id);
+        g.position = point(x, scaled.ascent());
+        glyphs.push(g);
+        x += h;
+    }
+
+    let w = x.ceil() as u32;
+    let h = scaled.height().ceil() as u32;
+    if w == 0 || h == 0 {
+        return None;
+    }
+
+    let mut buf = vec![0u8; (w * h * 4) as usize];
+    let stride = w as usize * 4;
+
+    for g in &glyphs {
+        if let Some(outline) = font.outline_glyph(g.clone()) {
+            outline.draw(|dx, dy, cov| {
+                if dx < w && dy < h {
+                    let i = dy as usize * stride + dx as usize * 4;
+                    let a = (cov * 255.0) as u8;
+                    buf[i] = 255;
+                    buf[i + 1] = 255;
+                    buf[i + 2] = 255;
+                    buf[i + 3] = a;
+                }
+            });
+        }
+    }
+
+    Some((
+        MemoryRenderBuffer::from_slice(
+            &buf,
+            Fourcc::Abgr8888,
+            (w as i32, h as i32),
+            1,
+            Transform::Normal,
+            None,
+        ),
+        (w, h),
+    ))
+}
+
 fn redraw(state: &mut State) {
     tracing::info!("redraw at ({:.0}, {:.0})", state.cursor_x, state.cursor_y);
     for backend in state.backends.values_mut() {
@@ -240,18 +347,49 @@ fn redraw(state: &mut State) {
             };
 
             let sz = sd._output.current_mode().unwrap().size;
-            let bg = SolidColorBuffer::new((sz.w, sz.h), Color32F::new(0.0, 0.2, 0.8, 1.0));
-            let bg_el = SolidColorRenderElement::from_buffer(&bg, (0, 0), 1.0, 1.0, Kind::Unspecified);
-
-            let cursor_size = 32;
             let cx = state.cursor_x as i32;
             let cy = state.cursor_y as i32;
-            let cur = SolidColorBuffer::new((cursor_size, cursor_size), Color32F::new(1.0, 1.0, 1.0, 1.0));
-            let cur_el = SolidColorRenderElement::from_buffer(&cur, (cx, cy), 1.0, 1.0, Kind::Unspecified);
+
+            // Build elements (all MemoryRenderBufferRenderElement for uniform type)
+            let mut elements: Vec<MemoryRenderBufferRenderElement<MultiRenderer<GbmBackend, GbmBackend>>> = Vec::new();
+
+            // Hello World text (centered)
+            if let (Some(buf), Some((tw, _th))) = (&state.text_buffer, state.text_size) {
+                let x = (sz.w - tw as i32) / 2;
+                let y = sz.h / 4;
+                if let Ok(el) = MemoryRenderBufferRenderElement::from_buffer(
+                    &mut renderer,
+                    (x as f64, y as f64),
+                    buf,
+                    Some(1.0),
+                    None,
+                    None,
+                    Kind::Unspecified,
+                ) {
+                    elements.push(el);
+                }
+            }
+
+            // cursor crosshair
+            if let Some(cbuf) = &state.cursor_buffer {
+                let cw = 34; // same as create_crosshair_buffer w
+                let ch = 34;
+                if let Ok(el) = MemoryRenderBufferRenderElement::from_buffer(
+                    &mut renderer,
+                    (cx as f64 - cw as f64 / 2.0, cy as f64 - ch as f64 / 2.0),
+                    cbuf,
+                    Some(1.0),
+                    None,
+                    None,
+                    Kind::Unspecified,
+                ) {
+                    elements.push(el);
+                }
+            }
 
             match sd.drm_output.render_frame(
                 &mut renderer,
-                &[bg_el, cur_el],
+                &elements,
                 Color32F::new(0.0, 0.2, 0.8, 1.0),
                 FrameFlags::empty(),
             ) {
