@@ -72,6 +72,7 @@ struct State {
     cursor_y: f64,
     output_w: i32,
     output_h: i32,
+    needs_redraw: bool,
 }
 
 fn main() {
@@ -114,6 +115,7 @@ fn main() {
         cursor_y: 100.0,
         output_w: 1920,
         output_h: 1080,
+        needs_redraw: true,
     };
 
     state
@@ -155,7 +157,7 @@ fn main() {
                     let p = event.delta();
                     state.cursor_x = (state.cursor_x + p.x).clamp(0.0, state.output_w as f64);
                     state.cursor_y = (state.cursor_y + p.y).clamp(0.0, state.output_h as f64);
-                    redraw(state);
+                    state.needs_redraw = true;
                 }
                 InputEvent::DeviceAdded { device } => {
                     tracing::info!("input: {}", device.name());
@@ -217,6 +219,10 @@ fn main() {
         event_loop
             .dispatch(Some(Duration::from_millis(16)), &mut state)
             .unwrap();
+        if state.needs_redraw {
+            state.needs_redraw = false;
+            redraw(&mut state);
+        }
     }
 }
 
