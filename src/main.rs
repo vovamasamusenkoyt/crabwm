@@ -280,7 +280,7 @@ fn create_crosshair_buffer(size: u32, thickness: u32, arm: u32) -> Option<Memory
 fn create_hello_world_buffer(font_size: f32) -> Option<(MemoryRenderBuffer, (u32, u32))> {
     use ab_glyph::{point, Font, FontRef, PxScale, ScaleFont};
 
-    let data = include_bytes!("/usr/share/fonts/TTF/DejaVuSans.ttf");
+    let data = include_bytes!("../DejaVuSans.ttf");
     let font = FontRef::try_from_slice(data).ok()?;
     let px_scale = PxScale::from(font_size);
     let scaled = font.as_scaled(px_scale);
